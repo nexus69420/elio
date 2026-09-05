@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from orchestrator.config import settings
 from orchestrator.llm.client import llm_client
+from orchestrator.runtime_llm import runtime_llm
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +23,9 @@ class SemanticMemory:
     def _collection_name_for(self) -> str:
         # Isolate stub (8-d) from real embed models (e.g. nomic 768-d) so switching
         # ORCHESTRATOR_STUB_LLM never blows up with dimension mismatch.
-        if settings.orchestrator_stub_llm:
+        if settings.orchestrator_stub_llm or runtime_llm.get().get("stub"):
             return "agent_lessons_stub_d8"
-        model = re.sub(r"[^a-zA-Z0-9]+", "_", settings.resolve_embed_model()).strip("_").lower()
+        model = re.sub(r"[^a-zA-Z0-9]+", "_", runtime_llm.resolve_embed_model()).strip("_").lower()
         return f"agent_lessons_{model}"[:60] or "agent_lessons_default"
 
     def _get_collection(self):

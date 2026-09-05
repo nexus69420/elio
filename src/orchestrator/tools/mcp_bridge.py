@@ -1,43 +1,50 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import concurrent.futures
 import logging
-import sys
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from orchestrator.config import settings
+from orchestrator.runtime_mcp import runtime_mcp
+from orchestrator.connector_catalog import tool_requires_approval
 from orchestrator.tools.registry import ToolSpec, tool_registry
 
 logger = logging.getLogger(__name__)
 
 
-def _default_demo_server() -> dict[str, Any]:
-    root = Path(__file__).resolve().parents[3]  # repo root from src/orchestrator/tools
-    # src/orchestrator/tools -> parents[0]=tools, [1]=orchestrator, [2]=src, [3]=repo
-    server = root / "mcp_servers" / "demo_server.py"
-    return {
-        "name": "demo",
-        "command": sys.executable,
-        "args": [str(server)],
-    }
+def _run_coro(coro):
+    """Run async MCP I/O safely from sync callers (API lifespan / Celery / FastAPI)."""
+    import sys
 
+    # Celery replaces stdout/stderr with LoggingProxy (no fileno) — breaks MCP stdio on Windows.
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is not None and not hasattr(stream, "fileno"):
+            real = getattr(sys, f"__{name}__", None)
+            if real is not None:
+                setattr(sys, name, real)
 
-def _parse_servers() -> list[dict[str, Any]]:
-    raw = (settings.mcp_servers or "").strip()
-    if raw:
-        data = json.loads(raw)
-        if isinstance(data, list):
-            return data
-        raise ValueError("MCP_SERVERS must be a JSON list")
-    # Default: ship the local demo MCP server when enabled
-    return [_default_demo_server()]
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    def _in_thread():
+        for name in ("stdout", "stderr"):
+            stream = getattr(sys, name, None)
+            if stream is not None and not hasattr(stream, "fileno"):
+                real = getattr(sys, f"__{name}__", None)
+                if real is not None:
+                    setattr(sys, name, real)
+        return asyncio.run(coro)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_in_thread).result(timeout=60)
 
 
 def _make_handler(server_name: str, tool_name: str):
     def handler(**kwargs: Any) -> Any:
-        return asyncio.run(_call_mcp_tool(server_name, tool_name, kwargs))
+        return _run_coro(_call_mcp_tool(server_name, tool_name, kwargs))
 
     return handler
 
@@ -46,7 +53,8 @@ async def _call_mcp_tool(server_name: str, tool_name: str, arguments: dict[str, 
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
-    servers = {s["name"]: s for s in _parse_servers()}
+    cfg_block = runtime_mcp.get()
+    servers = {s["name"]: s for s in cfg_block.get("servers") or []}
     cfg = servers.get(server_name)
     if not cfg:
         raise KeyError(f"Unknown MCP server {server_name}")
@@ -60,7 +68,6 @@ async def _call_mcp_tool(server_name: str, tool_name: str, arguments: dict[str, 
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(tool_name, arguments=arguments)
-            # Normalize content blocks
             texts = []
             for block in result.content or []:
                 text = getattr(block, "text", None)
@@ -96,37 +103,60 @@ async def _list_mcp_tools(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             return out
 
 
-def register_mcp_tools() -> list[str]:
-    """Discover MCP servers and register tools into the shared registry. Returns registered names."""
-    if not settings.mcp_enabled:
-        return []
-    registered: list[str] = []
+def probe_mcp_server(cfg: dict[str, Any]) -> dict[str, Any]:
+    name = cfg.get("name") or "mcp"
     try:
-        servers = _parse_servers()
+        tools = _run_coro(_list_mcp_tools(cfg))
+        return {"name": name, "ok": True, "tools": tools, "error": None}
     except Exception as exc:  # noqa: BLE001
-        logger.warning("MCP config invalid: %s", exc)
-        return []
+        return {"name": name, "ok": False, "tools": [], "error": str(exc)}
 
-    for cfg in servers:
-        name = cfg.get("name") or "mcp"
-        try:
-            tools = asyncio.run(_list_mcp_tools(cfg))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to load MCP server %s: %s", name, exc)
+
+def register_mcp_tools(*, reload: bool = False) -> dict[str, Any]:
+    """Discover MCP servers and register tools. Returns status payload for the Connectors UI."""
+    if reload:
+        tool_registry.unregister_prefix("mcp_")
+
+    cfg = runtime_mcp.get()
+    if not cfg.get("enabled"):
+        return {"enabled": False, "registered": [], "servers": [], "error": None}
+
+    registered: list[str] = []
+    server_status: list[dict[str, Any]] = []
+    for server in cfg.get("servers") or []:
+        name = server.get("name") or "mcp"
+        probe = probe_mcp_server(server)
+        server_status.append(
+            {
+                **probe,
+                "command": server.get("command"),
+                "args": server.get("args") or [],
+            }
+        )
+        if not probe["ok"]:
+            logger.warning("Failed to load MCP server %s: %s", name, probe["error"])
             continue
-        for tool in tools:
-            # Prefix to avoid collisions with built-ins
-            reg_name = f"mcp_{name}_{tool['name']}"
+        for tool in probe["tools"]:
+            raw_name = tool["name"]
+            # Avoid mcp_github_github_list_repos — strip redundant server prefix from tool name
+            short = raw_name
+            prefix = f"{name}_"
+            if short.startswith(prefix):
+                short = short[len(prefix) :]
+            reg_name = f"mcp_{name}_{short}"
             if any(t["name"] == reg_name for t in tool_registry.list_tools()):
+                registered.append(reg_name)
                 continue
             tool_registry.register(
                 ToolSpec(
                     name=reg_name,
-                    description=f"[MCP:{name}] {tool.get('description') or tool['name']}",
+                    description=f"[MCP:{name}] {tool.get('description') or raw_name}",
                     parameters=tool.get("inputSchema") or {"type": "object", "properties": {}},
-                    handler=_make_handler(name, tool["name"]),
-                    timeout_sec=30,
+                    handler=_make_handler(name, raw_name),
+                    timeout_sec=45,
+                    requires_approval=tool_requires_approval(reg_name, raw_name),
                 )
             )
             registered.append(reg_name)
-    return registered
+
+    return {"enabled": True, "registered": registered, "servers": server_status, "error": None}

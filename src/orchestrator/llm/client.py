@@ -8,6 +8,7 @@ from typing import Any, Optional
 import httpx
 
 from orchestrator.config import settings
+from orchestrator.runtime_llm import runtime_llm
 
 # Set by graph nodes so transcripts can attribute turns to a task
 current_task_id: ContextVar[Optional[str]] = ContextVar("current_task_id", default=None)
@@ -22,28 +23,47 @@ class LLMClient:
     """Multi-provider chat + embed: ollama (default) | openai | anthropic | stub."""
 
     def __init__(self) -> None:
-        self.host = settings.ollama_host.rstrip("/")
-        self.stub = settings.orchestrator_stub_llm
-        self.provider = (settings.llm_provider or "ollama").lower()
+        pass
+
+    @property
+    def cfg(self) -> dict[str, Any]:
+        return runtime_llm.get()
+
+    @property
+    def host(self) -> str:
+        return str(self.cfg.get("ollama_host") or settings.ollama_host).rstrip("/")
+
+    @property
+    def stub(self) -> bool:
+        cfg = self.cfg
+        return bool(cfg.get("stub")) or cfg.get("llm_provider") == "stub"
+
+    @property
+    def provider(self) -> str:
+        if self.stub:
+            return "stub"
+        return (self.cfg.get("llm_provider") or "ollama").lower()
 
     async def health(self) -> dict[str, Any]:
         if self.stub:
             return {"ok": True, "mode": "stub", "provider": "stub"}
         if self.provider == "openai":
-            ok = bool(settings.openai_api_key)
+            ok = bool(self.cfg.get("openai_api_key"))
             return {
                 "ok": ok,
                 "mode": "openai",
                 "provider": "openai",
                 "error": None if ok else "OPENAI_API_KEY missing",
+                "model": runtime_llm.resolve_chat_model("supervisor"),
             }
         if self.provider == "anthropic":
-            ok = bool(settings.anthropic_api_key)
+            ok = bool(self.cfg.get("anthropic_api_key"))
             return {
                 "ok": ok,
                 "mode": "anthropic",
                 "provider": "anthropic",
                 "error": None if ok else "ANTHROPIC_API_KEY missing",
+                "model": runtime_llm.resolve_chat_model("supervisor"),
             }
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -57,7 +77,7 @@ class LLMClient:
     def _default_model(self, model: Optional[str], role: str = "supervisor") -> str:
         if model:
             return model
-        return settings.resolve_chat_model(role)
+        return runtime_llm.resolve_chat_model(role)
 
     async def chat(
         self,
@@ -122,9 +142,9 @@ class LLMClient:
         temperature: float,
         format_json: bool,
     ) -> dict[str, Any]:
-        if not settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY not set")
-        headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+        if not self.cfg.get("openai_api_key"):
+            raise RuntimeError("OPENAI_API_KEY not set — add it in Settings")
+        headers = {"Authorization": f"Bearer {self.cfg['openai_api_key']}"}
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -132,7 +152,8 @@ class LLMClient:
         }
         if format_json:
             body["response_format"] = {"type": "json_object"}
-        async with httpx.AsyncClient(timeout=180.0, base_url=settings.openai_base_url) as client:
+        base = self.cfg.get("openai_base_url") or settings.openai_base_url
+        async with httpx.AsyncClient(timeout=180.0, base_url=base) as client:
             r = await client.post("/chat/completions", headers=headers, json=body)
             r.raise_for_status()
             data = r.json()
@@ -153,14 +174,14 @@ class LLMClient:
         temperature: float,
         format_json: bool,
     ) -> dict[str, Any]:
-        if not settings.anthropic_api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY not set")
+        if not self.cfg.get("anthropic_api_key"):
+            raise RuntimeError("ANTHROPIC_API_KEY not set — add it in Settings")
         system = "\n".join(m["content"] for m in messages if m["role"] == "system")
         if format_json:
             system = (system + "\nRespond with valid JSON only.").strip()
         converted = [{"role": m["role"], "content": m["content"]} for m in messages if m["role"] != "system"]
         headers = {
-            "x-api-key": settings.anthropic_api_key,
+            "x-api-key": self.cfg["anthropic_api_key"],
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
@@ -198,22 +219,24 @@ class LLMClient:
 
     async def _embed_ollama(self, texts: list[str]) -> list[list[float]]:
         vectors: list[list[float]] = []
+        model = runtime_llm.resolve_embed_model()
         async with httpx.AsyncClient(timeout=60.0) as client:
             for text in texts:
                 r = await client.post(
                     f"{self.host}/api/embeddings",
-                    json={"model": settings.resolve_embed_model(), "prompt": text},
+                    json={"model": model, "prompt": text},
                 )
                 r.raise_for_status()
                 vectors.append(r.json()["embedding"])
         return vectors
 
     async def _embed_openai(self, texts: list[str]) -> list[list[float]]:
-        if not settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY not set")
-        headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
-        body = {"model": settings.resolve_embed_model(), "input": texts}
-        async with httpx.AsyncClient(timeout=60.0, base_url=settings.openai_base_url) as client:
+        if not self.cfg.get("openai_api_key"):
+            raise RuntimeError("OPENAI_API_KEY not set — add it in Settings")
+        headers = {"Authorization": f"Bearer {self.cfg['openai_api_key']}"}
+        body = {"model": runtime_llm.resolve_embed_model(), "input": texts}
+        base = self.cfg.get("openai_base_url") or settings.openai_base_url
+        async with httpx.AsyncClient(timeout=60.0, base_url=base) as client:
             r = await client.post("/embeddings", headers=headers, json=body)
             r.raise_for_status()
             data = r.json()

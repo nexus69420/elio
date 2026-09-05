@@ -79,6 +79,8 @@ class ApprovalQueue:
         }
         req.status = mapping[body.action]
         req.resolution_note = body.note
+        if body.actor:
+            req.actor = body.actor
         if body.modified_action:
             req.proposed_action = body.modified_action
         if body.human_output:

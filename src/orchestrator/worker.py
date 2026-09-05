@@ -25,7 +25,7 @@ celery_app.conf.update(
 
 
 @celery_app.task(name="orchestrator.run_task", bind=True)
-def run_task_job(self, task_id: str, prompt: str, force_hitl: bool = True) -> dict:
+def run_task_job(self, task_id: str, prompt: str, force_hitl: bool = True, preset_id: str = "") -> dict:
     from orchestrator.graph.workflow import run_task
 
-    return asyncio.run(run_task(task_id, prompt, force_hitl=force_hitl))
+    return asyncio.run(run_task(task_id, prompt, force_hitl=force_hitl, preset_id=preset_id or None))

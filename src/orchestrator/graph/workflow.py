@@ -60,13 +60,27 @@ def get_graph():
     return _graph
 
 
-async def run_task(task_id: str, prompt: str, force_hitl: bool = True) -> dict[str, Any]:
+async def run_task(task_id: str, prompt: str, force_hitl: bool = True, preset_id: Optional[str] = None) -> dict[str, Any]:
+    # ChatGPT-style title: heuristic already set on create; polish with a short LLM call.
+    try:
+        from orchestrator.titles import polish_title, title_from_prompt
+
+        task = task_store.get(task_id)
+        if task:
+            polished = await polish_title(prompt, fallback=task.title or title_from_prompt(prompt))
+            if polished and polished != task.title:
+                task.title = polished
+                task_store.save(task)
+    except Exception:  # noqa: BLE001
+        pass
+
     root = trace_store.start_span(task_id=task_id, name="task", agent="orchestrator")
     graph = get_graph()
     initial: GraphState = {
         "task_id": task_id,
         "prompt": prompt,
         "force_hitl": force_hitl,
+        "preset_id": preset_id or "",
         "results": [],
         "reviews": [],
         "retry_subtask_ids": [],

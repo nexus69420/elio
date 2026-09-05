@@ -14,6 +14,7 @@ class GraphState(TypedDict, total=False):
     task_id: str
     prompt: str
     force_hitl: bool
+    preset_id: str
     memories: list[dict[str, Any]]
     plan: Optional[dict[str, Any]]
     results: Annotated[list[dict[str, Any]], _merge_list]

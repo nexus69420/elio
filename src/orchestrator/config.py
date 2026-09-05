@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     anthropic_supervisor_model: str = "claude-3-5-haiku-latest"
     anthropic_specialist_model: str = "claude-3-5-haiku-latest"
 
+    # When set, /v1/* requires Authorization: Bearer <token> or X-API-Key
+    orchestrator_api_token: str = ""
+
     orchestrator_stub_llm: bool = False
     orchestrator_auto_approve: bool = False
     hitl_force_final: bool = True
@@ -50,6 +53,12 @@ class Settings(BaseSettings):
     # JSON list: [{"name":"demo","command":"python","args":["mcp_servers/demo_server.py"]}]
     mcp_servers: str = ""
     mcp_enabled: bool = True
+
+    # GitHub OAuth (Connect with GitHub) — optional; can also be set in Mission Control
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+    orchestrator_public_url: str = "http://127.0.0.1:8000"
+    frontend_public_url: str = "http://127.0.0.1:5173"
 
     data_dir: Path = Path("./data")
     workspace_dir: Path = Path("./data/workspace")

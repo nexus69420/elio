@@ -1,6 +1,7 @@
 from orchestrator.tools.code_exec import code_exec
 from orchestrator.tools.files import file_read, file_write
 from orchestrator.tools.mcp_bridge import register_mcp_tools
+from orchestrator.tools.native_github import register_native_github_tools
 from orchestrator.tools.registry import ToolRegistry, ToolSpec, tool_registry
 from orchestrator.tools.web_search import web_search
 
@@ -68,7 +69,9 @@ def register_default_tools() -> ToolRegistry:
         )
         _BUILTINS_READY = True
 
-    # MCP tools (idempotent — skips already-registered names)
+    # Native first-party connectors (work inside Celery; no MCP stdio)
+    register_native_github_tools(reload=True)
+    # Optional third-party / demo MCP servers
     register_mcp_tools()
     return tool_registry
 

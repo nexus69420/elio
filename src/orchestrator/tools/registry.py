@@ -13,6 +13,7 @@ class ToolSpec:
     handler: Callable[..., Any]
     timeout_sec: float = 30.0
     rate_limit_per_min: int = 30
+    requires_approval: bool = False
     _calls: list[float] = field(default_factory=list)
 
     def check_rate_limit(self) -> None:
@@ -30,15 +31,28 @@ class ToolRegistry:
     def register(self, spec: ToolSpec) -> None:
         self._tools[spec.name] = spec
 
+    def unregister_prefix(self, prefix: str) -> int:
+        names = [n for n in list(self._tools) if n.startswith(prefix)]
+        for n in names:
+            del self._tools[n]
+        return len(names)
+
     def list_tools(self) -> list[dict[str, Any]]:
         return [
             {
                 "name": t.name,
                 "description": t.description,
                 "parameters": t.parameters,
+                "requires_approval": bool(t.requires_approval),
             }
             for t in self._tools.values()
         ]
+
+    def requires_approval(self, name: str) -> bool:
+        try:
+            return bool(self.get(name).requires_approval)
+        except KeyError:
+            return False
 
     def get(self, name: str) -> ToolSpec:
         if name not in self._tools:
@@ -60,7 +74,7 @@ class ToolRegistry:
             args["content"] = args["text"]
         try:
             result = spec.handler(**args)
-            return {
+            out = {
                 "name": name,
                 "arguments": args,
                 "ok": True,
@@ -68,13 +82,31 @@ class ToolRegistry:
                 "latency_ms": (time.time() - started) * 1000,
             }
         except Exception as exc:  # noqa: BLE001
-            return {
+            out = {
                 "name": name,
                 "arguments": args,
                 "ok": False,
                 "error": str(exc),
                 "latency_ms": (time.time() - started) * 1000,
             }
+        try:
+            from orchestrator.audit import audit_log
+            from orchestrator.llm.client import current_task_id
+
+            task_id = current_task_id.get() or ""
+            # Avoid logging huge file contents
+            safe_args = {k: (f"<{len(str(v))} chars>" if k in {"content", "code", "text"} else v) for k, v in args.items()}
+            audit_log.record(
+                action="tool.invoked",
+                actor="agent",
+                task_id=task_id,
+                resource_type="tool",
+                resource_id=name,
+                detail={"ok": out.get("ok"), "arguments": safe_args, "error": out.get("error", "")},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return out
 
     def schemas_for_prompt(self) -> str:
         lines = []

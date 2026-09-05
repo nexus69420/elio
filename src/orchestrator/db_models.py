@@ -29,3 +29,16 @@ class ApprovalRow(Base):
     status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuditRow(Base):
+    __tablename__ = "audit_events"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    actor: Mapped[str] = mapped_column(String(128), nullable=False, default="system", index=True)
+    action: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)
+    resource_type: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    resource_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    detail_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

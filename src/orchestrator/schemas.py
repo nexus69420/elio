@@ -99,6 +99,7 @@ class ApprovalRequest(BaseModel):
     status: ApprovalStatus = ApprovalStatus.pending
     resolution_note: str = ""
     human_output: str = ""
+    actor: str = ""
     created_at: str = Field(default_factory=utc_now)
     resolved_at: Optional[str] = None
 
@@ -106,6 +107,7 @@ class ApprovalRequest(BaseModel):
 class TaskRecord(BaseModel):
     id: str = Field(default_factory=lambda: new_id("task"))
     prompt: str
+    title: str = ""
     status: TaskStatus = TaskStatus.queued
     plan: Optional[Plan] = None
     results: list[AgentResult] = Field(default_factory=list)
@@ -113,6 +115,8 @@ class TaskRecord(BaseModel):
     deliverable: str = ""
     error: str = ""
     force_hitl: bool = True
+    preset_id: str = ""
+    created_by: str = ""
     created_at: str = Field(default_factory=utc_now)
     updated_at: str = Field(default_factory=utc_now)
 
@@ -120,6 +124,7 @@ class TaskRecord(BaseModel):
 class TaskCreate(BaseModel):
     prompt: str
     force_hitl: bool = True
+    preset_id: Optional[str] = None
 
 
 class ApprovalResolve(BaseModel):
@@ -127,6 +132,7 @@ class ApprovalResolve(BaseModel):
     note: str = ""
     modified_action: str = ""
     human_output: str = ""
+    actor: str = ""
 
 
 class SpanRecord(BaseModel):

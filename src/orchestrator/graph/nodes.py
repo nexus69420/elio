@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Optional
 
 from orchestrator.config import settings
 from orchestrator.hitl.queue import approval_queue
 from orchestrator.llm.client import current_agent, current_task_id, llm_client
 from orchestrator.memory.semantic import semantic_memory
 from orchestrator.memory.working import working_memory
+from orchestrator.runtime_agents import runtime_agents
 from orchestrator.schemas import (
     ApprovalLevel,
     ApprovalRequest,
@@ -24,6 +25,11 @@ from orchestrator.tracing.spans import trace_store
 def _bind_context(task_id: str, agent: str):
     current_task_id.set(task_id)
     current_agent.set(agent)
+
+
+def _preset_id(state: dict[str, Any]) -> Optional[str]:
+    pid = (state.get("preset_id") or "").strip()
+    return pid or None
 
 
 PLAN_SYSTEM = """You are the Supervisor Agent. Create an execution plan as JSON only.
@@ -53,8 +59,13 @@ Prefer failing for retry over rubber-stamping.
 """
 
 
-SPECIALIST_SYSTEM = """You are a specialist agent ({role}).
+SPECIALIST_SYSTEM = """You are a specialist agent ({role} — {display_name}).
 {role_rules}
+
+Connected app tools: when the user asks about THEIR GitHub data, you MUST call
+github_list_repos / github_whoami / github_list_issues / etc. (exact names below).
+Do NOT invent tool names. Do NOT use web_search or code_exec for their GitHub account.
+Do NOT ask the user for a token — authentication is already configured.
 
 You may call tools by returning JSON:
 {{
@@ -69,26 +80,6 @@ Tool schemas (use exact argument names):
 Obey the ORIGINAL user task format constraints in final_answer.
 """
 
-
-ROLE_RULES = {
-    "research": (
-        "Produce sourced bullet facts, not essays. Prefer web_search. "
-        "Cite titles/URLs from tool results. Keep it tight."
-    ),
-    "analysis": (
-        "Produce tradeoffs / comparisons / a clear recommendation grounded in prior research. "
-        "Do NOT use code_exec just to print strings — only for real computation. "
-        "Stay structured and concise."
-    ),
-    "writing": (
-        "Produce the final user-facing text in EXACTLY the format the user asked for "
-        "(e.g. if they asked for 3 bullets, output exactly 3 bullets — nothing else). "
-        "file_write args MUST be {\"path\": \"...\", \"content\": \"...\"}."
-    ),
-    "code": (
-        "Write and run real code to verify claims. Prefer code_exec with actual logic, not print-only stubs."
-    ),
-}
 
 SYNTHESIZE_SYSTEM = """You are the Supervisor synthesizing the final deliverable.
 Match the ORIGINAL user task format EXACTLY.
@@ -131,11 +122,17 @@ async def plan_node(state: dict[str, Any]) -> dict[str, Any]:
 
     memory_block = "\n\n".join(m.get("document", "") for m in state.get("memories") or []) or "(none)"
     user = f"User task:\n{state['prompt']}\n\nRelevant past memories:\n{memory_block}"
+    preset = _preset_id(state)
+    supervisor = runtime_agents.get_agent("supervisor", preset_id=preset)
+    plan_system = PLAN_SYSTEM
+    extra = (supervisor.get("instructions") or "").strip()
+    if extra:
+        plan_system = f"{PLAN_SYSTEM}\n\nOperator profile notes:\n{extra}"
     try:
         parsed, resp = await llm_client.chat_json(
-            system=PLAN_SYSTEM,
+            system=plan_system,
             user=user,
-            model=settings.supervisor_model,
+            model=runtime_agents.model_for("supervisor", preset_id=preset),
         )
         # Normalize subtasks
         raw_subs = parsed.get("subtasks") or []
@@ -146,19 +143,30 @@ async def plan_node(state: dict[str, Any]) -> dict[str, Any]:
                 role = SpecialistRole(specialist)
             except ValueError:
                 role = SpecialistRole.research
+            profile_hitl = runtime_agents.requires_hitl(role.value, preset_id=preset)
             subtasks.append(
                 Subtask(
                     description=item.get("description") or "Work on task",
                     specialist=role,
                     depends_on=[],
                     expected_output=item.get("expected_output") or "",
-                    sensitive=bool(item.get("sensitive", False)),
+                    sensitive=bool(item.get("sensitive", False)) or profile_hitl,
                 )
             )
         if not subtasks:
             subtasks = [
-                Subtask(description="Research the topic", specialist=SpecialistRole.research, expected_output="facts"),
-                Subtask(description="Analyze findings", specialist=SpecialistRole.analysis, expected_output="analysis"),
+                Subtask(
+                    description="Research the topic",
+                    specialist=SpecialistRole.research,
+                    expected_output="facts",
+                    sensitive=runtime_agents.requires_hitl("research", preset_id=preset),
+                ),
+                Subtask(
+                    description="Analyze findings",
+                    specialist=SpecialistRole.analysis,
+                    expected_output="analysis",
+                    sensitive=runtime_agents.requires_hitl("analysis", preset_id=preset),
+                ),
                 Subtask(
                     description="Write the brief",
                     specialist=SpecialistRole.writing,
@@ -166,12 +174,15 @@ async def plan_node(state: dict[str, Any]) -> dict[str, Any]:
                     sensitive=True,
                 ),
             ]
+        plan_needs_hitl = bool(parsed.get("requires_human_plan_approval", False)) or runtime_agents.requires_hitl(
+            "supervisor", preset_id=preset
+        )
         plan = Plan(
             goal=parsed.get("goal") or state["prompt"][:200],
             subtasks=subtasks,
             confidence=float(parsed.get("confidence", 0.7)),
             rationale=parsed.get("rationale") or "",
-            requires_human_plan_approval=bool(parsed.get("requires_human_plan_approval", False)),
+            requires_human_plan_approval=plan_needs_hitl,
         )
         working_memory.set(task_id, "plan", plan.model_dump())
         _save_task_progress(task_id, plan=plan)
@@ -222,20 +233,46 @@ async def maybe_approve_plan_node(state: dict[str, Any]) -> dict[str, Any]:
     return {"approval": resolved.model_dump()}
 
 
-def _tool_names_for_role(role: SpecialistRole) -> list[str]:
-    mcp_tools = [t["name"] for t in tool_registry.list_tools() if t["name"].startswith("mcp_")]
-    if role == SpecialistRole.research:
-        return ["web_search", "file_write", *mcp_tools]
-    if role == SpecialistRole.analysis:
-        return ["file_read", "code_exec", "file_write", *mcp_tools]
-    if role == SpecialistRole.writing:
-        return ["file_read", "file_write", *mcp_tools]
-    return ["code_exec", "file_read", "file_write", *mcp_tools]
+def _tool_names_for_role(role: SpecialistRole, preset_id: Optional[str] = None) -> list[str]:
+    app_tools = [
+        t["name"]
+        for t in tool_registry.list_tools()
+        if t["name"].startswith(("mcp_", "github_", "slack_", "fs_"))
+    ]
+    return runtime_agents.tool_names_for_role(role.value, preset_id=preset_id, mcp_tools=app_tools)
+
+
+def _ground_answer_in_tools(final_answer: str, tool_calls_log: list[dict[str, Any]], user_prompt: str) -> str:
+    """If github_list_repos succeeded but the model ignored it, use the tool payload."""
+    for tc in reversed(tool_calls_log):
+        if not tc.get("ok"):
+            continue
+        name = tc.get("name") or ""
+        result = tc.get("result")
+        if name == "github_list_repos" and isinstance(result, list) and result:
+            names = [r.get("full_name") for r in result if isinstance(r, dict) and r.get("full_name")]
+            if not names:
+                continue
+            # Model hallucinated placeholders / ignored tool output
+            if not any(n in (final_answer or "") for n in names[:5]):
+                return "\n".join(f"- {n}" for n in names)
+        if name == "github_whoami" and isinstance(result, dict) and result.get("login"):
+            login = result["login"]
+            if login not in (final_answer or ""):
+                return json.dumps(result, indent=2)
+    return final_answer
 
 
 async def execute_specialists_node(state: dict[str, Any]) -> dict[str, Any]:
+    # Reload native + MCP connectors every run (Celery must see OAuth tokens / new apps).
     register_default_tools()
+    from orchestrator.tools.mcp_bridge import register_mcp_tools
+    from orchestrator.tools.native_github import register_native_github_tools
+
+    register_native_github_tools(reload=True)
+    register_mcp_tools(reload=True)
     task_id = state["task_id"]
+    preset = _preset_id(state)
     _bind_context(task_id, "specialist")
     _save_task_progress(task_id, status=TaskStatus.executing)
     plan = Plan.model_validate(state["plan"])
@@ -253,12 +290,27 @@ async def execute_specialists_node(state: dict[str, Any]) -> dict[str, Any]:
         if not retry_ids and prior_outputs.get(sub.id) and sub.id not in retry_ids:
             continue
 
+        profile = runtime_agents.get_agent(sub.specialist.value, preset_id=preset)
+        if not profile.get("enabled", True):
+            new_results.append(
+                {
+                    "subtask_id": sub.id,
+                    "specialist": sub.specialist.value,
+                    "output": f"Agent {sub.specialist.value} is disabled in team config.",
+                    "tool_calls": [],
+                    "success": False,
+                    "error": "agent disabled",
+                }
+            )
+            failures[sub.id] = failures.get(sub.id, 0) + 1
+            continue
+
         span = trace_store.start_span(
             task_id=task_id,
             name=f"specialist:{sub.specialist.value}",
             agent=sub.specialist.value,
             parent_id=state.get("root_span_id"),
-            attributes={"subtask_id": sub.id, "description": sub.description},
+            attributes={"subtask_id": sub.id, "description": sub.description, "display_name": profile.get("display_name")},
         )
         _bind_context(task_id, sub.specialist.value)
         context_bits = [f"Overall goal: {plan.goal}", f"Your subtask: {sub.description}"]
@@ -268,21 +320,25 @@ async def execute_specialists_node(state: dict[str, Any]) -> dict[str, Any]:
         for r in new_results:
             context_bits.append(f"Prior ({r['specialist']}): {r['output'][:800]}")
 
-        allowed = _tool_names_for_role(sub.specialist)
+        allowed = _tool_names_for_role(sub.specialist, preset_id=preset)
         tool_prompt = "\n".join(
-            f"- {t['name']}: {t['description']} | params={json.dumps(t['parameters'])}"
+            f"- {t['name']}: {t['description']}"
+            + (" [REQUIRES HUMAN APPROVAL before running]" if t.get("requires_approval") else "")
+            + f" | params={json.dumps(t['parameters'])}"
             for t in tool_registry.list_tools()
             if t["name"] in allowed
         )
         role = sub.specialist.value
         system = SPECIALIST_SYSTEM.format(
             role=role,
-            role_rules=ROLE_RULES.get(role, "Stay concise and factual."),
-            tools=tool_prompt,
+            display_name=profile.get("display_name") or role,
+            role_rules=runtime_agents.role_rules(role, preset_id=preset),
+            tools=tool_prompt or "(no tools allowed)",
         )
         tool_calls_log: list[dict[str, Any]] = []
         final_answer = ""
         total_in = total_out = 0
+        model_override = runtime_agents.model_for(role, preset_id=preset)
 
         try:
             for _round in range(3):
@@ -293,7 +349,7 @@ async def execute_specialists_node(state: dict[str, Any]) -> dict[str, Any]:
                         + "\n".join(context_bits)
                         + f"\n\nTool results so far:\n{json.dumps(tool_calls_log)[:3000]}"
                     ),
-                    model=settings.specialist_model if settings.llm_provider == "ollama" else None,
+                    model=model_override,
                     role="specialist",
                 )
                 total_in += resp.get("input_tokens", 0)
@@ -306,12 +362,43 @@ async def execute_specialists_node(state: dict[str, Any]) -> dict[str, Any]:
                         if name not in allowed:
                             tool_calls_log.append({"name": name, "ok": False, "error": "tool not allowed for role"})
                             continue
+                        if tool_registry.requires_approval(name):
+                            req = ApprovalRequest(
+                                task_id=task_id,
+                                level=ApprovalLevel.approve_action,
+                                reason=f"Sensitive tool call requires approval: {name}",
+                                proposed_action=json.dumps({"tool": name, "arguments": args}, indent=2),
+                                context={"kind": "tool_gate", "tool": name, "specialist": role},
+                            )
+                            approval_queue.enqueue(req)
+                            _save_task_progress(task_id, status=TaskStatus.awaiting_approval)
+                            resolved = await approval_queue.wait(req.id)
+                            if resolved.status.value == "rejected":
+                                tool_calls_log.append(
+                                    {
+                                        "name": name,
+                                        "arguments": args,
+                                        "ok": False,
+                                        "error": "human rejected tool call",
+                                        "approval_id": req.id,
+                                    }
+                                )
+                                continue
+                            if resolved.status.value == "modified" and resolved.proposed_action:
+                                try:
+                                    patched = json.loads(resolved.proposed_action)
+                                    if isinstance(patched, dict):
+                                        args = patched.get("arguments") or args
+                                        name = patched.get("tool") or name
+                                except Exception:  # noqa: BLE001
+                                    pass
                         result = tool_registry.invoke(name, args)
                         tool_calls_log.append(result)
                     continue
                 final_answer = parsed.get("final_answer") or parsed.get("answer") or ""
                 if not final_answer and isinstance(parsed, dict):
                     final_answer = json.dumps(parsed)
+                final_answer = _ground_answer_in_tools(final_answer, tool_calls_log, state["prompt"])
                 break
 
             if not final_answer:
@@ -321,21 +408,28 @@ async def execute_specialists_node(state: dict[str, Any]) -> dict[str, Any]:
                         {
                             "role": "system",
                             "content": (
-                                f"You are the {sub.specialist.value} specialist. "
-                                f"{ROLE_RULES.get(role, '')} Match the ORIGINAL user task format."
+                                f"You are the {profile.get('display_name') or role} specialist. "
+                                f"{runtime_agents.role_rules(role, preset_id=preset)} "
+                                "Match the ORIGINAL user task format. "
+                                "If tool results are present, use ONLY those facts — never invent placeholders."
                             ),
                         },
                         {
                             "role": "user",
-                            "content": f"ORIGINAL USER TASK:\n{state['prompt']}\n\n" + "\n".join(context_bits),
+                            "content": (
+                                f"ORIGINAL USER TASK:\n{state['prompt']}\n\n"
+                                + "\n".join(context_bits)
+                                + f"\n\nTool results:\n{json.dumps(tool_calls_log)[:4000]}"
+                            ),
                         },
                     ],
-                    model=settings.specialist_model if settings.llm_provider == "ollama" else None,
+                    model=model_override,
                     role="specialist",
                 )
                 total_in += prose.get("input_tokens", 0)
                 total_out += prose.get("output_tokens", 0)
                 final_answer = prose["content"]
+                final_answer = _ground_answer_in_tools(final_answer, tool_calls_log, state["prompt"])
 
             failed_tools = [t for t in tool_calls_log if not t.get("ok", True)]
             result = {
@@ -426,10 +520,18 @@ async def review_node(state: dict[str, Any]) -> dict[str, Any]:
             f"Output:\n{result.get('output','')[:3000]}"
         )
         try:
+            reviewer = runtime_agents.get_agent("reviewer", preset_id=_preset_id(state))
+            review_system = REVIEW_SYSTEM
+            extra = (reviewer.get("instructions") or "").strip()
+            if extra:
+                review_system = f"{REVIEW_SYSTEM}\n\nOperator profile notes:\n{extra}"
+            contract = (reviewer.get("output_contract") or "").strip()
+            if contract:
+                review_system = f"{review_system}\nOutput contract: {contract}"
             parsed, resp = await llm_client.chat_json(
-                system=REVIEW_SYSTEM,
+                system=review_system,
                 user=user,
-                model=settings.supervisor_model,
+                model=runtime_agents.model_for("reviewer", preset_id=_preset_id(state)),
             )
             score = float(parsed.get("score", 0.5))
             passed = bool(parsed.get("passed", score >= settings.review_pass_threshold))
@@ -508,12 +610,21 @@ async def synthesize_node(state: dict[str, Any]) -> dict[str, Any]:
         latest[r["subtask_id"]] = r
     parts = [f"## {v['specialist']}\n{v['output']}" for v in latest.values()]
     user = f"Original task:\n{state['prompt']}\n\nSpecialist outputs:\n\n" + "\n\n".join(parts)
+    preset = _preset_id(state)
+    supervisor = runtime_agents.get_agent("supervisor", preset_id=preset)
+    synth = SYNTHESIZE_SYSTEM
+    extra = (supervisor.get("instructions") or "").strip()
+    if extra:
+        synth = f"{SYNTHESIZE_SYSTEM}\n\nOperator profile notes:\n{extra}"
+    contract = (supervisor.get("output_contract") or "").strip()
+    if contract:
+        synth = f"{synth}\nOutput contract: {contract}"
     resp = await llm_client.chat(
         messages=[
-            {"role": "system", "content": SYNTHESIZE_SYSTEM},
+            {"role": "system", "content": synth},
             {"role": "user", "content": user},
         ],
-        model=settings.supervisor_model,
+        model=runtime_agents.model_for("supervisor", preset_id=preset),
     )
     deliverable = resp["content"]
     working_memory.set(task_id, "draft_deliverable", deliverable)
@@ -529,12 +640,16 @@ async def hitl_final_node(state: dict[str, Any]) -> dict[str, Any]:
     low_review = any(float(r.get("score", 1)) < settings.review_pass_threshold for r in reviews)
     double_fail = any(v >= 2 for v in failures.values())
     sensitive = any(s.sensitive for s in plan.subtasks) or state.get("force_hitl", True)
+    preset = _preset_id(state)
+    profile_hitl = any(
+        runtime_agents.requires_hitl(s.specialist.value, preset_id=preset) for s in plan.subtasks
+    ) or runtime_agents.requires_hitl("writing", preset_id=preset)
 
-    if not (sensitive or low_review or double_fail or settings.hitl_force_final):
+    if not (sensitive or profile_hitl or low_review or double_fail or settings.hitl_force_final):
         return {}
 
     reason_bits = []
-    if sensitive or settings.hitl_force_final:
+    if sensitive or profile_hitl or settings.hitl_force_final:
         reason_bits.append("final deliverable requires human approval")
     if low_review:
         reason_bits.append("reviewer score below threshold")
