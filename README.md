@@ -102,6 +102,42 @@ export E2B_API_KEY=...
 
 Falls back to the local sandbox if E2B is unavailable.
 
+## Provider settings (UI)
+
+Open **Settings** in Mission Control to switch providers without editing `.env`:
+
+1. Choose **Ollama**, **OpenAI**, **Anthropic**, or **Stub**
+2. Pick supervisor / specialist / embed models from the dropdowns (or type a custom id)
+3. Paste your API key for cloud providers → **Save** → optional **Test**
+
+Keys are stored in local Redis (masked in the API response). Celery workers read the same runtime config on each LLM call.
+
+You can still set defaults in `.env`; UI overrides win until Redis is cleared.
+
+## Access control & audit
+
+Set a server token to lock the API:
+
+```bash
+export ORCHESTRATOR_API_TOKEN=your-secret
+```
+
+Clients send `Authorization: Bearer …` or `X-API-Key`, plus optional `X-Actor` for HITL attribution.  
+Mission Control **Settings → Access & actor** stores token/name in the browser.  
+Append-only events: `GET /v1/audit` (task created, approval resolved, tools, LLM settings).
+
+## Cost model
+
+Transcripts carry provider/model/token counts. Costs use a local price sheet (`orchestrator/costing.py`):
+
+- Ollama / stub → **$0**
+- OpenAI / Anthropic → approximate public USD / 1M tokens
+
+```http
+GET /v1/traces/{task_id}   # cost_proxy_usd + by_model
+GET /v1/costs              # rollup across recent tasks
+```
+
 ## Configuration highlights
 
 Copy `.env.example` → `.env`. Important knobs:
@@ -162,10 +198,6 @@ export LANGSMITH_API_KEY=...
 ```bash
 python demos/research_brief.py
 ```
-
-## Backlog
-
-Deferred items (auth/audit, cost model) live in [BACKLOG.md](BACKLOG.md).
 
 ## License
 

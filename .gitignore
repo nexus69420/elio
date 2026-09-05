@@ -14,3 +14,6 @@ build/
 web/node_modules/
 web/dist/
 ui/
+BACKLOG.md
+*.local.md
+notes/
