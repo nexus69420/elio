@@ -1,23 +1,35 @@
-# Agent Orchestration System
+# Agent Orchestration
 
-Multi-agent runtime with **supervisor → specialists → reviewer → HITL**, backed by the same infra you’d list on a resume — still **$0/month** (local Docker + Ollama).
+Local-first multi-agent runtime: **supervisor → specialists → reviewer → human-in-the-loop**, with durable queues, hybrid memory, tool use (including MCP), and full-run inspect/replay.
 
-## Resume stack (no dumb tradeoffs)
+Default stack runs at **$0/month** via Docker + [Ollama](https://ollama.com).
+
+## Features
+
+- LangGraph workflow: plan → specialist tools → review → synthesize → HITL gates
+- Celery workers on Redis, durable task/approval state in PostgreSQL
+- Working memory (Redis) + semantic memory (Chroma)
+- Built-in tools (web search, sandboxed files, code exec) + MCP bridge
+- Multi-provider LLMs: Ollama (default), OpenAI, or Anthropic
+- OpenTelemetry → Jaeger traces; optional LangSmith
+- Mission Control UI (React/Vite): runs inbox, approvals, timeline, conversation replay
+- Stub eval harness for offline CI-style smoke checks
+
+## Stack
 
 | Layer | Tech |
 |-------|------|
-| Orchestration | LangGraph multi-agent graph |
+| Orchestration | LangGraph |
 | API | FastAPI |
-| Workers | **Celery** |
-| Broker / working memory | **Redis** |
-| Durable state | **PostgreSQL** |
-| Observability | **OpenTelemetry → Jaeger** (+ optional LangSmith) |
+| Workers | Celery |
+| Broker / working memory | Redis |
+| Durable state | PostgreSQL |
+| Observability | OpenTelemetry → Jaeger (+ optional LangSmith) |
 | Long-term memory | Chroma |
-| UI | **React (Vite)** — tasks, HITL, traces, **replay**, memory |
-| Tools | Built-ins + **MCP** demo server |
-| LLMs | **Multi-provider**: Ollama default; OpenAI/Anthropic via env |
-| Code sandbox | Local jail + optional **E2B** free Hobby tier |
-| Evals | `python -m evals.run_evals` |
+| UI | React (Vite) + TypeScript |
+| Tools | Built-ins + MCP demo server |
+| LLMs | Ollama / OpenAI / Anthropic |
+| Code sandbox | Local jail (+ optional E2B) |
 
 ## Architecture
 
@@ -25,7 +37,7 @@ Multi-agent runtime with **supervisor → specialists → reviewer → HITL**, b
 React UI ──► FastAPI ──► Celery (Redis broker) ──► LangGraph agents
                 │                │
                 ├─ Postgres      ├─ Redis working memory
-                ├─ Chroma        └─ tool calls (search / files / sandbox)
+                ├─ Chroma        └─ tools (search / files / sandbox / MCP)
                 └─ OTel spans ──► Jaeger UI (:16686)
 ```
 
@@ -44,101 +56,117 @@ ollama pull nomic-embed-text
 ## Quick start
 
 ```bash
-copy .env.example .env
+cp .env.example .env   # Windows: copy .env.example .env
 
-# Infra: Postgres + Redis + Jaeger
+# Infra
 docker compose up -d postgres redis jaeger
 
 python -m venv .venv
+# Windows
 .\.venv\Scripts\activate
+# macOS/Linux
+# source .venv/bin/activate
+
 pip install -r requirements.txt
+export PYTHONPATH=src   # Windows PowerShell: $env:PYTHONPATH="src"
 
 # API
 uvicorn orchestrator.main:app --reload --app-dir src --port 8000
 
-# Celery worker (separate terminal)
-celery -A orchestrator.worker.celery_app worker --loglevel=INFO
-# (set PYTHONPATH=src on Windows: $env:PYTHONPATH="src")
+# Celery worker (separate terminal; on Windows add --pool=solo)
+celery -A orchestrator.worker.celery_app worker --loglevel=INFO --pool=solo
 
-# React UI
-cd web
-npm install
-npm run dev
+# UI
+cd web && npm install && npm run dev
 ```
 
-Open:
-- UI: http://localhost:5173
-- API docs: http://localhost:8000/docs
-- Jaeger: http://localhost:16686
+| Service | URL |
+|---------|-----|
+| Mission Control UI | http://localhost:5173 |
+| API docs | http://localhost:8000/docs |
+| Jaeger | http://localhost:16686 |
 
-Stub / offline (no Ollama):
+### Offline / stub mode (no Ollama)
 
 ```bash
-$env:ORCHESTRATOR_STUB_LLM=1
-$env:ORCHESTRATOR_AUTO_APPROVE=1
+export ORCHESTRATOR_STUB_LLM=1
+export ORCHESTRATOR_AUTO_APPROVE=1
 ```
 
-Optional E2B cloud sandbox (Hobby free credits):
+### Optional E2B sandbox
 
 ```bash
-$env:CODE_SANDBOX="e2b"
-$env:E2B_API_KEY="..."
+export CODE_SANDBOX=e2b
+export E2B_API_KEY=...
 ```
 
-Falls back to local sandbox automatically if E2B is unavailable.
+Falls back to the local sandbox if E2B is unavailable.
 
-## Multi-LLM providers
+## Configuration highlights
 
-Default is local Ollama (`LLM_PROVIDER=ollama`). To swap:
+Copy `.env.example` → `.env`. Important knobs:
+
+| Variable | Purpose |
+|----------|---------|
+| `LLM_PROVIDER` | `ollama` (default) \| `openai` \| `anthropic` |
+| `ORCHESTRATOR_AUTO_APPROVE` | Skip HITL when `1` |
+| `HITL_FORCE_FINAL` | Always gate final deliverable |
+| `MCP_ENABLED` | Load MCP demo tools |
+| `OTEL_ENABLED` | Export spans to Jaeger |
+
+### Cloud LLM providers
 
 ```bash
-# OpenAI
-$env:LLM_PROVIDER="openai"
-$env:OPENAI_API_KEY="sk-..."
+export LLM_PROVIDER=openai
+export OPENAI_API_KEY=sk-...
 
-# Anthropic (embeds still use Ollama locally)
-$env:LLM_PROVIDER="anthropic"
-$env:ANTHROPIC_API_KEY="..."
+# or
+export LLM_PROVIDER=anthropic
+export ANTHROPIC_API_KEY=...
 ```
+
+Anthropic chat uses the API; embeddings still go through local Ollama by default.
 
 ## MCP tools
 
-With `MCP_ENABLED=1`, the demo MCP server (`mcp_servers/demo_server.py`) auto-registers tools like `mcp_demo_get_time`. Point `MCP_SERVERS` JSON at any stdio MCP server to add more.
+With `MCP_ENABLED=1`, `mcp_servers/demo_server.py` registers tools such as `mcp_demo_get_time`. Override with `MCP_SERVERS` (JSON list of stdio MCP servers) to plug in your own.
 
-## Evals + conversation replay
+## Evals & replay
 
 ```bash
-$env:PYTHONPATH="src"
-$env:ORCHESTRATOR_STUB_LLM=1
-$env:ORCHESTRATOR_AUTO_APPROVE=1
-$env:MCP_ENABLED=0
+export PYTHONPATH=src
+export ORCHESTRATOR_STUB_LLM=1
+export ORCHESTRATOR_AUTO_APPROVE=1
+export MCP_ENABLED=0
 python -m evals.run_evals
 ```
 
-Replay any task in the UI **replay** tab or `GET /v1/replay/{task_id}`.
+Inspect any run in the UI (**Inspect → timeline / replay / output**) or:
 
-## LangSmith (optional)
-
-**LangSmith** is LangChain’s hosted tracing/eval product (not the same as LangGraph).  
-We already ship **Jaeger** for $0 always-on traces. LangSmith’s free Developer tier (~5k traces/mo) is optional for nicer LLM-centric eval UI:
-
-```bash
-$env:LANGSMITH_TRACING=1
-$env:LANGSMITH_API_KEY="..."
+```http
+GET /v1/traces/{task_id}
+GET /v1/replay/{task_id}
 ```
 
-Use Jaeger as the source of truth; turn on LangSmith only when you want their dashboard.
+## Optional LangSmith
 
-## Backlog
+Jaeger is the default always-on tracer. To also send traces to LangSmith:
 
-See [BACKLOG.md](BACKLOG.md) for deferred governance (auth/audit) and cost-model work.
+```bash
+export LANGSMITH_TRACING=1
+export LANGSMITH_API_KEY=...
+```
 
-## Demo
+## Demo script
 
 ```bash
 python demos/research_brief.py
 ```
 
-## Interview line
+## Backlog
 
-> I built a multi-agent orchestration platform on LangGraph with Celery, Redis, Postgres, OpenTelemetry/Jaeger, MCP tool bridges, multi-provider LLM routing, conversation replay + eval harness, and a React HITL console — defaulting to fully local $0 inference.
+Deferred items (auth/audit, cost model) live in [BACKLOG.md](BACKLOG.md).
+
+## License
+
+Use freely for learning and demos. Add a formal license file if you need one for redistribution.
