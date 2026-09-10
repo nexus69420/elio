@@ -45,6 +45,7 @@ export type Task = {
   deliverable?: string;
   error?: string;
   created_at?: string;
+  updated_at?: string;
   force_hitl?: boolean;
   preset_id?: string;
   created_by?: string;

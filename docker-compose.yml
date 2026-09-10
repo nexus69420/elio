@@ -52,6 +52,9 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OLLAMA_HOST: http://host.docker.internal:11434
+      PYTHONPATH: /app/src
+      FRONTEND_PUBLIC_URL: http://localhost:5173
+      ORCHESTRATOR_PUBLIC_URL: http://localhost:8000
     ports:
       - "8000:8000"
     depends_on:
@@ -83,6 +86,8 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OLLAMA_HOST: http://host.docker.internal:11434
       PYTHONPATH: /app/src
+      FRONTEND_PUBLIC_URL: http://localhost:5173
+      ORCHESTRATOR_PUBLIC_URL: http://localhost:8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -100,7 +105,7 @@ services:
     environment:
       VITE_API_BASE: http://localhost:8000
     ports:
-      - "5173:5173"
+      - "5174:5173"
     depends_on:
       - api
 
