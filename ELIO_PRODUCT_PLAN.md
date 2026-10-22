@@ -1,329 +1,114 @@
-# Elio — Product Plan & Build Tracker
+# Elio product plan
 
-> Living checklist. Edit freely: add, remove, reorder.
-> Status key: `[x]` done · `[~]` partial/stub · `[ ]` not built · `[?]` decide later
+Updated 22 October 2026.
 
-**One-liner:** Elio is a chat-first AI workspace that plans, uses your tools, asks when it should, and finishes real work — locally or with your models.
+**Direction:** an everyday AI assistant that uses tools and specialized agents through a continuing chat to complete useful work across a person's apps and information.
 
-**North star:** Feel as clear as Cursor chat, as useful as a junior coworker with connectors, as trustworthy as HITL when stakes are high.
+The [vision](docs/VISION.md) explains the intended experience. This plan separates code that exists from work still required. “Exists” means present in source, not verified in a running environment. All milestones below are planned; this documentation update does not implement them.
 
----
+## Current implementation baseline
 
-## 1. Who it’s for & what they should be able to do
+| Area | Present in the code | Gap to the intended experience |
+|------|---------------------|--------------------------------|
+| Chat and tasks | Composer, task list, recents, prompt/result views | Every message creates an isolated task; no persisted conversation/message model |
+| Execution | Celery jobs and LangGraph plan/execute/review | Fixed pipeline, sequential specialists; no direct-answer routing or dependency-aware fan-out |
+| Progress | Task/approval polling, traces, replay, Inspect | No streamed timeline or tokens; no cancellation API |
+| Approvals | PostgreSQL records, Redis notifications/polling, inline approve/modify/reject | Selected actions gated; built-in file writes ungated; final approval occurs after tools |
+| Agents | Supervisor, research, analysis, writing, code, reviewer; profiles and presets | Everyday task categories, capability selection, and agent evaluations |
+| Tools | Search, workspace files, Python execution, native GitHub subset, MCP | Structured results, consistent permissions, reliability, broader integrations |
+| Connections | GitHub OAuth/PAT; MCP demo/filesystem/GitHub/Slack configuration | Connection health/permissions and personal-admin connectors |
+| Memory | Redis working memory and workspace-wide Chroma lessons | Conversation context and memory inspection/edit/forget controls |
+| Models | Ollama, OpenAI-compatible, Anthropic, stub, editable settings | Verified provider/model combinations and task-aware routing |
+| Diagnostics | Audit, transcripts, estimated costs, OpenTelemetry/Jaeger | User-facing failure explanations and enforced budgets |
+| Controls | Packs and Quick/Assist/Work/Deep labels | Intensity primarily changes approval settings, not execution depth/budgets |
 
-### Primary user
-Solo builder / operator who wants one place to talk to agents that can research, write, code, and act on GitHub/Slack/files — without losing control.
+## Milestone 1: continuing chat with reliable connected work
 
-### Jobs to be done
-| Job | User should be able to… |
-|-----|-------------------------|
-| Ask anything | Start a chat, pick intensity, send a goal in plain language |
-| Stay in control | Require approval before risky actions; approve / modify / reject inline |
-| Use their world | Connect GitHub, Slack, filesystem (and more later); see what’s connected |
-| Shape agents | View/edit agent roles, tools, instructions; switch workflow packs |
-| Continue work | Browse recents/tasks; reopen a thread; inspect what happened |
-| Run local-first | Use Ollama (or OpenAI/Anthropic) without mandatory cloud lock-in |
-| Trust the system | See status, costs, audit, traces; know when backend/LLM is down |
-| Ship outcomes | Get a clear deliverable, not just chat fluff |
+**Outcome:** work through a task over multiple messages, see what Elio is doing, approve a proposed action, and reopen the conversation with its context intact.
 
----
+### Conversation foundation
 
-## 2. Product surfaces (UI)
+- [ ] Persist conversations and ordered user/assistant messages separately from task runs.
+- [ ] Associate runs, approvals, and results with their conversation and initiating message.
+- [ ] Append follow-ups to the selected conversation; New chat starts a separate context.
+- [ ] Supply relevant history to the runtime with explicit context limits.
+- [ ] Reopen a conversation after refresh/restart without losing messages or completed outcomes.
+- [ ] Define behavior for messages sent while a run is active; preserve ordering and avoid accidental duplicate work.
+- [ ] Keep existing task records accessible when introducing conversations.
 
-### Shell
-- [x] Dark/light theme
-- [x] Collapsible left sidebar (animated)
-- [x] Brand / New chat / nav
-- [x] Recents list + search
-- [x] Backend online/offline + refresh
-- [~] Right Inspect pane (raw JSON — needs product polish)
-- [ ] Command palette (⌘/Ctrl+K)
-- [ ] Keyboard-first nav everywhere
-- [ ] Multi-window / pop-out chat
-- [ ] Onboarding checklist (first-run)
+### Visible execution and control
 
-### Chat (home)
-- [x] Empty state + starter cards
-- [x] Composer (pack, intensity, ask-before-acting, send)
-- [x] Thread = task prompt + deliverable + status
-- [x] Inline approval cards
-- [~] Title control (chevron present, no real switcher)
-- [ ] Streaming tokens / live step timeline in-thread
-- [ ] Edit & resend / branch chat
-- [ ] Attach files / folders / URLs to a message
-- [ ] @-mention agents, tools, or connectors
-- [ ] Stop / cancel running task
-- [ ] Retry failed step
-- [ ] Pin / star / rename / archive chats
-- [ ] Share read-only transcript link (later SaaS)
-- [ ] Voice input (mic exists as stub)
+- [ ] Display an ordered timeline of plans, steps, tool calls/results, approvals, and terminal outcomes.
+- [ ] Deliver live progress events and recover the timeline after reconnecting.
+- [ ] Support cancellation with an explicit terminal state. Prevent further actions once cancellation is acknowledged; show actions already completed or in flight.
+- [ ] Keep task listing read-only; determine failures from execution evidence rather than polling-time guesses.
+- [ ] Define retry/recovery behavior so failures and duplicate job delivery do not silently repeat external writes.
 
-### Tasks / runs
-- [x] Task list + filters → open in chat
-- [ ] Kanban or status board
-- [ ] Bulk cancel / retry
-- [ ] Scheduled / recurring tasks
-- [ ] Run templates (“every Monday: summarize inbox”)
+### Consistent approvals
 
-### Connections
-- [x] Catalog enable/disable
-- [x] GitHub OAuth + secrets
-- [x] MCP config save/reload
-- [~] Slack / filesystem (backend more ready than UX polish)
-- [ ] Connection health tests per connector
-- [ ] Per-connector permissions (“read-only” vs “can write”)
-- [ ] OAuth for Slack / Google / Notion / Linear (expand)
-- [ ] “Suggested setup” for empty workspace
+- [ ] Enforce approval before execution for writes covered by the user's policy, including built-in file writes.
+- [ ] Show the target, action, and proposed arguments; validate edits and recheck permissions before execution.
+- [ ] Preserve rejection and approval history. Final-answer approval must not substitute for permission to execute an earlier action.
+- [ ] Resume pending approvals across API/worker boundaries and recover explicitly from interruption.
 
-### Agents
-- [x] List agents + edit profile (instructions, tools, HITL, model)
-- [x] Builtin presets + apply + save custom preset
-- [x] Reset to defaults
-- [ ] Agent gallery / marketplace (local packs first)
-- [ ] Visual graph of who calls whom
-- [ ] Eval scorecards per agent
-- [ ] Always-on / background agents
-- [ ] Multi-agent debate / parallel specialists UI
+### First connected journey and acceptance criteria
 
-### Customize / Settings
-- [x] LLM provider + models + keys + test
-- [x] Actor + API token
-- [x] Cost rollup, audit, tools list, semantic memory browse
-- [ ] Memory manager (search, delete, pin lessons)
-- [ ] Policy center (global HITL rules, allow/deny tools)
-- [ ] Workspace export/import
-- [ ] Notification prefs (desktop, Slack DM)
+Use the existing GitHub integration to summarize repository issues, refine the summary in the same conversation, and propose a follow-up issue. GitHub is the initial integration; the product direction includes everyday work beyond software development.
 
-### Inspect / observability (in-app)
-- [~] Trace + replay + working memory dumps
-- [ ] Step timeline (plan → tools → review → deliverable)
-- [ ] Diff of proposed tool args before approve
-- [ ] Cost per chat / per step
-- [ ] One-click open Jaeger for a task
-- [ ] Failure autopsy (“why it stopped”)
+This milestone is complete when:
 
----
+1. Follow-ups correctly use earlier messages and tool results without requiring the user to restate context.
+2. Refreshing/reopening restores messages, run status, completed results, and pending approvals.
+3. A proposed issue write waits for approval; rejection causes no write; approval executes the displayed action once.
+4. Progress and a clear result or actionable error are visible. Cancellation prevents subsequent actions once acknowledged.
+5. Failure/restart checks cover persistence, approval resolution, external-write duplication, and recovery.
+6. The journey passes integration checks with fixtures or explicitly designated test resources, followed by browser verification. The validation record identifies live dependencies and side effects.
 
-## 3. Agents (have vs build)
+## Milestone 2: useful everyday tasks
 
-### Built-in roles (exist)
-| ID | Role | Purpose |
-|----|------|---------|
-| `supervisor` | Supervisor | Plans, routes, synthesizes |
-| `research` | Research | Gather info (web, repos, docs) |
-| `analysis` | Analysis | Structure findings, tradeoffs |
-| `writing` | Writing | Drafts (HITL by default) |
-| `code` | Code | Code changes, repro, patches |
-| `reviewer` | Reviewer | Quality / risk check before final |
+**Outcome:** support repeated personal and information work beyond the first technical integration.
 
-### Builtin packs (exist)
-- [x] `research_brief`
-- [x] `code_review`
-- [x] `job_application`
-- [ ] User-defined packs as first-class “Workflows” product surface
+- [ ] Select and validate a first personal-admin integration, such as email or calendar.
+- [ ] Research/writing journeys with sources and reusable drafts/artifacts.
+- [ ] Inbox triage and reply drafts; meeting notes to actions.
+- [ ] File/URL attachments and conversation-scoped context.
+- [ ] Connection health checks and understandable read/write permissions.
+- [ ] Rename, search, pin, and archive conversations.
+- [ ] Inspect, edit, and forget longer-term memories separately from chat history.
+- [ ] Reusable workflows/custom agents without manual graph configuration.
+- [ ] Direct answers for simple requests and suitable specialists for complex work.
+- [ ] Enforced step/time/cost budgets; intensity controls with actual runtime effects.
 
-### Agents / packs to build (product-worthy)
-- [ ] **Inbox / life admin** — email/Slack triage, drafts, reminders
-- [ ] **PR coworker** — open PR, review, respond to comments
-- [ ] **Incident helper** — logs → hypothesis → fix PR
-- [ ] **Docs writer** — README / ADR / changelog from repo
-- [ ] **Data analyst** — CSV/SQL → charts + narrative
-- [ ] **Security pass** — dependency + secret scan + report
-- [ ] **Onboarding buddy** — explain unfamiliar repo
-- [ ] **Meeting → actions** — notes → tasks + GitHub issues
-- [ ] **Browser agent** (optional) — navigate + extract with approval
-- [ ] **Custom agent builder** — wizard: goal → tools → HITL → test run
+Choose concrete user journeys before expanding the connector catalog. Each needs a clear input, permissions, deliverable, and failure path.
 
----
+## Milestone 3: work over time
 
-## 4. Tools (have vs build)
+**Outcome:** carry out agreed background and recurring work with visible history and user control.
 
-### Built-in today
-- [x] `web_search`
-- [x] `file_read` / `file_write` (workspace sandbox)
-- [x] `code_exec` (local sandbox; e2b optional)
-- [x] Native GitHub subset (`whoami`, repos, issues, PRs, get_file, create_issue)
-- [x] MCP bridge (demo, filesystem, github, slack servers)
+- [ ] Reminders and scheduled/recurring tasks with timezone-aware scheduling.
+- [ ] Persistent schedules, cancellation, missed-run behavior, and duplicate-run protection.
+- [ ] Notifications that distinguish useful results, failures, and required user action.
+- [ ] Background agents with bounded permissions and execution budgets.
+- [ ] Project contexts and optional parallel specialists with dependency handling.
 
-### Tool gaps to close
-- [ ] Parity: native GitHub = full MCP GitHub set (comment, update file, get issue)
-- [ ] Reliable MCP under Windows/Celery (or drop MCP-in-worker, keep native)
-- [ ] Structured tool results in chat UI (cards, not only final text)
-- [ ] Tool allowlists per pack / per intensity
+## Capability backlog
 
-### Tools a best-in-class Elio should add
-- [ ] Repo map / symbol search (code intelligence)
-- [ ] Git CLI actions (branch, commit, PR) with HITL
-- [ ] Terminal session tool (approved commands only)
-- [ ] Browser / Playwright tool (HITL for navigate & submit)
-- [ ] Calendar / email connectors (Google)
-- [ ] Notion / Linear / Jira issue tools
-- [ ] Image understand / generate (optional)
-- [ ] HTTP request tool (user-defined allowlist)
-- [ ] Memory write/read tools agents can call explicitly
-- [ ] “Ask user” tool (structured questions mid-run)
+These extend the everyday-assistant direction; their ordering is not a release commitment.
 
----
+| Area | Candidates |
+|------|------------|
+| Agents/workflows | Personal admin, researcher, writer, data analyst, meeting assistant, PR coworker, incident helper, docs writer, onboarding helper, security review |
+| Connections | Gmail/Calendar/Drive, Notion, Linear/Jira, Discord, database readers, Sentry/Datadog, Figma, OpenAPI/webhooks |
+| Tools | Browser interaction, repository/symbol search, Git/terminal actions, HTTP requests, explicit memory tools, structured questions to the user |
+| Media/context | Images, voice input, richer files/artifacts, local folders as projects |
+| Workspace | Command palette, keyboard navigation, onboarding, notifications, export/import, shareable transcripts |
+| Quality | Step-level costs, proposed-action diffs, failure explanations, agent scorecards, connector/tool evaluations |
+| Platform | Provider presets, model routing, secret handling, authentication/roles if expanding beyond one workspace |
 
-## 5. Connectors
+## Working rules
 
-### Exist
-- [x] GitHub (OAuth + PAT fallback)
-- [x] Filesystem
-- [x] Slack
-- [x] Demo
-
-### Should build (phased)
-- [ ] Google (Gmail, Calendar, Drive) — OAuth
-- [ ] Notion
-- [ ] Linear / Jira
-- [ ] Discord
-- [ ] Postgres / DB read-only
-- [ ] Sentry / Datadog (read incidents)
-- [ ] Figma (read)
-- [ ] Generic OpenAPI / webhook connector
-- [ ] “Local folder as project” first-class (beyond generic FS)
-
----
-
-## 6. Core platform features
-
-### Orchestration
-- [x] LangGraph workflow (memory → plan → execute → review → synthesize → HITL → persist)
-- [x] Celery worker + Redis + Postgres
-- [x] Intensity → HITL / depth mapping (`quick` / `assist` / `work` / `deep`)
-- [ ] True streaming of plan/tools/tokens to UI (SSE/WebSocket)
-- [ ] Parallel specialist fan-out with merge
-- [ ] Human “take over” path in UI
-- [ ] Pause / resume / cancel
-- [ ] Budgets (max $ / max steps / max time) enforced
-
-### HITL & trust
-- [x] Plan + tool + final gates
-- [x] Inline approve / modify / reject
-- [ ] Take over in UI
-- [ ] Policy rules (“never push”, “always ask before email”)
-- [ ] Approval history per chat
-- [ ] Risk labels on proposed actions
-
-### Memory
-- [x] Working memory (Redis)
-- [x] Semantic memory (Chroma)
-- [~] Browse in Settings
-- [ ] Chat-scoped vs workspace-scoped memory UX
-- [ ] Forget / edit memories
-- [ ] “Remember this” explicit user action
-- [ ] Project memory packs (per repo)
-
-### Models
-- [x] Ollama / OpenAI / Anthropic / stub
-- [x] Settings UI + test
-- [ ] OpenRouter / Azure / local LM Studio presets
-- [ ] Per-agent model overrides that “just work”
-- [ ] Model router (cheap for plan, strong for code)
-
-### Observability
-- [x] OTel → Jaeger
-- [x] Traces, replay, costs, audit APIs
-- [~] Exposed roughly in Inspect/Settings
-- [ ] Product-grade run debugger
-- [ ] Optional LangSmith polish
-
-### Security & tenancy
-- [x] Optional API token + actor header
-- [ ] Real auth (email magic link / OIDC) — when leaving single-workspace
-- [ ] Workspaces / orgs / roles
-- [ ] Secrets vault UI
-- [ ] Audit export
-- [ ] Sandbox hardening review
-
----
-
-## 7. What a user can do today (honest)
-
-1. Open Elio, connect backend (Docker), optionally connect GitHub.
-2. Start a chat; choose intensity + pack; toggle ask-before-acting.
-3. Send a goal; watch task status; approve risky steps inline.
-4. Read the deliverable; open Inspect for memory/trace dumps.
-5. Browse Tasks / Recents; reopen work.
-6. Edit agents & presets; change LLM provider; scan costs/audit/tools/memory.
-
----
-
-## 8. What a user should be able to do (target)
-
-1. **One prompt → finished artifact** (PR, doc, issue set, report) with clear steps visible.
-2. **Never fear surprise writes** — approvals are obvious, editable, and fast.
-3. **Bring their stack** — GitHub/Slack/files first; Google/Notion/Linear next.
-4. **Teach Elio** — save packs, pin memories, tune agents without YAML pain.
-5. **Debug any failure** in under a minute (timeline + tool I/O + retry).
-6. **Stay local** when they want; use cloud models when they choose.
-7. **Come back tomorrow** — scheduled runs, pinned chats, project contexts.
-
----
-
-## 9. Suggested build phases (for tracking)
-
-### Phase A — Solid MVP (trust + clarity)
-- [ ] Streaming run timeline in chat
-- [ ] Stop/cancel task
-- [ ] Polish Inspect (timeline, not JSON walls)
-- [ ] Approval `take_over` + better modify UX
-- [ ] GitHub tool parity + MCP/Windows reliability
-- [ ] Fix first-run: empty connectors → guided connect
-- [ ] Stable Docker story (health green, UI port docs)
-
-### Phase B — Daily driver
-- [ ] Attachments + @ mentions
-- [ ] Rename/pin/archive chats
-- [ ] Memory manager
-- [ ] Policy center (global HITL rules)
-- [ ] PR coworker + Docs writer packs
-- [ ] Slack connector UX complete
-- [ ] Budgets (steps/$/time)
-
-### Phase C — Differentiated workspace
-- [ ] Always-on / scheduled agents
-- [ ] Browser tool (HITL)
-- [ ] Google connector set
-- [ ] Visual agent graph + evals
-- [ ] Project-scoped workspaces (multi-repo)
-- [ ] Command palette + power keyboard UX
-
-### Phase D — Productize (only if going beyond single-tenant)
-- [ ] Auth, billing, multi-workspace
-- [ ] Share / collaborate
-- [ ] Hosted cloud offering
-- [ ] Pack marketplace
-
----
-
-## 10. Explicit non-goals (for now — edit if you disagree)
-
-- [?] Multiplayer editing of the same live agent run
-- [?] Fully autonomous unbounded internet agent with no HITL
-- [?] Replacing the IDE (Elio complements Cursor; doesn’t become VS Code)
-- [?] Training custom foundation models
-- [?] Mobile-native app (responsive web is enough initially)
-
----
-
-## 11. Tracking scratchpad
-
-**Next 3 picks (you fill):**
-1. …
-2. …
-3. …
-
-**Cut list (you fill):**
-- …
-
-**Open questions:**
-- Local-only forever vs path to hosted SaaS?
-- How aggressive should default HITL be?
-- Is “always-on agents” core or later?
-- Browser agent: in or out of MVP?
-
----
-
-*Generated as a working inventory + aspiration list for Elio. Treat statuses as starting points — correct anything that’s wrong as you edit.*
+- Update implementation status when behavior exists and its validation is recorded; mark partial integration explicitly.
+- Reassess scope around complete user journeys rather than the number of tools/agents added.
+- Preserve the single-workspace/local model path while hosted deployment and commercial scope remain undecided.
+- Accounts, billing, collaboration, a marketplace, and native mobile clients have no committed release scope.
+- Use the [development guide](docs/DEVELOPMENT.md) for current setup and verification limits.

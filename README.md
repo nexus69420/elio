@@ -1,59 +1,57 @@
 # Elio
 
-**Chat-first AI workspace** that runs agentic workflows across your tools — from quick asks to multi-agent jobs with human-in-the-loop.
+**An everyday AI assistant, built around chat.**
 
-Local-first by default (Docker + [Ollama](https://ollama.com)). OpenAI / Anthropic (or OpenRouter via OpenAI-compatible base URL) optional.
+Elio is being built as one place to ask for help with daily work and life: research a question, draft a document, organize information, work across your apps, or follow through on a recurring task. Tools and specialized agents provide the capabilities behind the conversation.
 
-> Work in progress — single-workspace product MVP, not multi-tenant SaaS yet.
+Describe the outcome, let Elio choose the appropriate tools and agents, follow its progress, approve actions when needed, and come back later to continue the work.
 
-## What you get
+> Early prototype. The current app runs individual tasks from a chat interface. Continuing conversations, reminders, recurring tasks, and many capabilities below are planned.
 
-- **Chat** home: ask Elio to do things; intensity + pack + “ask before acting” controls
-- **Tasks**: every run, open back into the thread
-- **Connections**: GitHub (OAuth), Slack, filesystem — writes pause for approval in chat
-- **Agents & packs**: personalize prompts, tools, HITL; apply workflow packs from chat
-- Under the hood: LangGraph supervisor → specialists → reviewer → HITL, Celery, Redis, Postgres, Chroma, OTel
+## Where Elio is going
 
-## Stack
+- **Everyday help:** research, writing, planning, information management, and personal admin alongside technical work.
+- **Connected work:** use files, email, calendars, messaging, documents, and other apps from one conversation.
+- **Appropriate capabilities:** answer simple questions directly and bring in specialists for work that needs them.
+- **Work that continues:** preserve context, handle follow-ups, provide manageable memory, and support reminders and recurring work.
+- **Visible actions:** show progress, tool results, proposed changes, approvals, and clear outcomes or failures.
+- **Model choice:** retain local execution and local models while allowing optional cloud providers.
 
-| Layer | Tech |
-|-------|------|
-| Orchestration | LangGraph |
-| API | FastAPI |
-| Workers | Celery + Redis |
-| State | PostgreSQL |
-| Memory | Redis + Chroma |
-| UI | React (Vite) · Elio workspace |
-| LLMs | Ollama / OpenAI / Anthropic |
-| Tools | Built-ins + MCP connectors |
+The target includes requests such as “research this and draft a brief,” “turn these meeting notes into actions,” and “summarize my inbox every morning.” Email access and scheduling are not implemented yet.
 
-## Quick start
+Read the [product vision](docs/VISION.md) and [implementation roadmap](ELIO_PRODUCT_PLAN.md).
+
+## What exists today
+
+The repository contains a single-workspace prototype with:
+
+- React pages for Chat, Tasks, Connections, Agents, and Settings.
+- FastAPI task APIs, Celery background jobs, and PostgreSQL task persistence.
+- A LangGraph workflow for memory retrieval, planning, sequential specialists, review, synthesis, approval, and persistence.
+- Editable agent profiles and packs for research briefs, code review, and job applications.
+- Web search, workspace files, Python execution, native GitHub tools, and MCP integration with demo, filesystem, GitHub, and Slack servers.
+- GitHub OAuth/PAT configuration, model settings, persisted approvals, task history, audit records, transcripts, cost estimates, and tracing.
+- Ollama, OpenAI-compatible, Anthropic, and stub model paths.
+
+These are capabilities present in source, not a claim that every integration has been validated end to end.
+
+### Current limits
+
+Each submission creates a new task; reopening a result does not provide a continuing conversation. Progress is polled rather than streamed, and there is no task cancellation API. Intensity controls primarily affect approval settings; they do not implement different reasoning depths or execution budgets.
+
+Approval gates cover selected connector actions and final output. Built-in workspace file writes are currently ungated, so “ask before acting” is not a universal approval policy. Consistent action approvals are part of the first milestone.
+
+## Run locally
+
+See the [development guide](docs/DEVELOPMENT.md) for prerequisites, host/Windows setup, separate terminal commands, and verification.
+
+For the container development stack, install Docker Compose and configure `.env`:
 
 ```bash
-cp .env.example .env   # Windows: copy .env.example .env
-
-docker compose up -d postgres redis jaeger
-
-python -m venv .venv
-# Windows
-.\.venv\Scripts\activate
-# macOS/Linux
-# source .venv/bin/activate
-
-pip install -r requirements.txt
-export PYTHONPATH=src   # PowerShell: $env:PYTHONPATH="src"
-
-uvicorn orchestrator.main:app --reload --app-dir src --port 8000
-
-# separate terminal — Windows needs --pool=solo
-celery -A orchestrator.worker.celery_app worker --loglevel=INFO --pool=solo
-
-cd web && npm install && npm run dev
+cp .env.example .env
 ```
 
-Open **http://127.0.0.1:5173** — Chat is the default.
-
-Pull models if using Ollama:
+With the default Ollama provider, install Ollama on the host and pull the configured models:
 
 ```bash
 ollama pull qwen2.5:7b
@@ -61,12 +59,32 @@ ollama pull qwen2.5:3b
 ollama pull nomic-embed-text
 ```
 
-## Product notes
+Start the stack:
 
-- One chat message → one orchestrated task (approvals appear inline).
-- Intensity maps client-side to HITL / pack selection; packs come from `/v1/agents` presets.
-- Optional API gate: set `ORCHESTRATOR_API_TOKEN` and paste it in Settings.
+```bash
+docker compose up -d
+```
 
-## Repo
+- UI: [localhost:5174](http://localhost:5174)
+- API docs: [localhost:8000/docs](http://localhost:8000/docs)
+- Jaeger: [localhost:16686](http://localhost:16686)
 
-Formerly “agent-orchestration / Mission Control.” Same runtime; Elio is the product shell.
+Compose publishes UI port 5174 but sets OAuth's frontend return URL to port 5173. Before using GitHub OAuth with the container UI, set `FRONTEND_PUBLIC_URL` to `http://localhost:5174` in **both** the `api` and `worker` service environment blocks. Editing only `.env` does not override those values. Host UI development uses port 5173.
+
+## Stack and repository
+
+| Area | Implementation |
+|------|----------------|
+| API and persistence | FastAPI, SQLAlchemy, PostgreSQL |
+| Task execution | LangGraph, Celery, Redis |
+| Memory | Redis working memory, Chroma semantic lessons |
+| UI | React, TypeScript, Vite |
+| Tools and apps | Built-in tools, native GitHub, MCP |
+| Diagnostics | OpenTelemetry, Jaeger, transcripts, audit, cost estimates |
+
+- `src/orchestrator/`: API, runtime, agents, tools, memory, and tracing.
+- `web/`: chat workspace and supporting pages.
+- `mcp_servers/`: connector servers.
+- `tests/` and `evals/`: existing checks and stub evaluation cases.
+
+Elio began as agent orchestration, became Mission Control, and evolved into a chat-first workspace. The next milestone is a continuing conversation that completes a connected task with visible progress and consistent approvals.
